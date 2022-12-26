@@ -13,27 +13,46 @@
 #     option to forego checkpointing (not needed during inference)
 #     MPS support
 #     optimizations (batched matmul, fused multiply) (at the expense of support for mask + bias)
+#     typings
 # implementation of:
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
 
 from functools import partial
 import torch
+from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from ..utils.attention_slicing_utils import dynamic_slice, map_pt, scan
+from ..utils.attention_slicing_utils import dynamic_slice, map_pt, scan, AttnChunk
 import math
-from typing import Optional
+from typing import Optional, NamedTuple, Protocol, List
 
 
-def _query_chunk_attention(query, key, value,
-                           key_chunk_size: Optional[int]=None,
-                           use_checkpoint=True):
+class SummarizeChunk(Protocol):
+    def __call__(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+    ) -> AttnChunk: ...
+
+
+def _query_chunk_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    key_chunk_size: Optional[int] = None,
+    use_checkpoint = True,
+):
     num_kv, num_heads, k_features = key.shape[-3:]
     v_features = value.shape[-1]
     key_chunk_size = min(key_chunk_size or int(math.sqrt(num_kv)), num_kv)
     scale = k_features ** -0.5
 
-    def summarize_chunk(query, key, value):
+    def summarize_chunk(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+    ) -> AttnChunk:
         attn_weights = torch.baddbmm(
             torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
             query,
@@ -46,10 +65,10 @@ def _query_chunk_attention(query, key, value,
         exp_weights = torch.exp(attn_weights - max_score)
         exp_values = torch.bmm(exp_weights, value)
         max_score = max_score.squeeze(-1)
-        return exp_values, exp_weights.sum(dim=-1), max_score
-    summarizer = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
+        return AttnChunk(exp_values, exp_weights.sum(dim=-1), max_score)
+    summarizer: SummarizeChunk = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
 
-    def chunk_scanner(chunk_idx):
+    def chunk_scanner(chunk_idx: int) -> AttnChunk:
         key_chunk = dynamic_slice(key, tuple([0] * (key.ndim - 3)) + (chunk_idx, 0, 0),
                                   tuple(key.shape[:-3]) + (key_chunk_size, num_heads, k_features))
         value_chunk = dynamic_slice(value, tuple([0] * (value.ndim - 3)) + (chunk_idx, 0, 0),
@@ -69,11 +88,18 @@ def _query_chunk_attention(query, key, value,
     all_weights = torch.unsqueeze(chunk_weights, -1).sum(dim=0)
     return all_values / all_weights
 
+class ScannedChunk(NamedTuple):
+    chunk_idx: int
+    attn_chunk: AttnChunk
 
-def efficient_dot_product_attention(query, key, value,
-                                    query_chunk_size=1024,
-                                    key_chunk_size: Optional[int] = None,
-                                    use_checkpoint=True):
+def efficient_dot_product_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    query_chunk_size=1024,
+    key_chunk_size: Optional[int] = None,
+    use_checkpoint=True,
+):
     """Computes efficient dot-product attention given query, key, and value.
       This is efficient version of attention presented in
       https://arxiv.org/abs/2112.05682v2 which comes with O(sqrt(n)) memory requirements.
@@ -92,14 +118,14 @@ def efficient_dot_product_attention(query, key, value,
       """
     num_q, num_heads, q_features = query.shape[-3:]
 
-    def chunk_scanner(chunk_idx, _):
+    def chunk_scanner(chunk_idx: int, _) -> AttnChunk:
         query_chunk = dynamic_slice(query, tuple([0] * (query.ndim - 3)) + (chunk_idx, 0, 0),
                                     tuple(query.shape[:-3]) + (min(query_chunk_size, num_q), num_heads, q_features))
 
-        return (chunk_idx + query_chunk_size,
+        return ScannedChunk(chunk_idx + query_chunk_size,
                 _query_chunk_attention(query_chunk, key, value, key_chunk_size=key_chunk_size,
                                        use_checkpoint=use_checkpoint))
 
     _, res = scan(chunk_scanner, init=0, xs=None, length=math.ceil(num_q / query_chunk_size))
-    rl = [res[i] for i in range(res.shape[0])]
+    rl: List[Tensor] = [res[i] for i in range(res.shape[0])]
     return torch.cat(rl, dim=-3)
