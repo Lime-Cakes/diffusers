@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional, Union
+from .sub_quadratic_attention import efficient_dot_product_attention
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from torch import nn, Tensor
 
 from ..utils.import_utils import is_xformers_available
 
@@ -145,6 +146,20 @@ class CrossAttention(nn.Module):
             processor = CrossAttnProcessor()
 
         self.set_processor(processor)
+    
+    def set_subquadratic_attention(
+        self,
+        query_chunk_size = 1024,
+        kv_chunk_size: Optional[int] = None,
+    ):
+        r"""
+        Args:
+            query_chunk_size (`int`, *optional*, defaults to `1024`)
+            kv_chunk_size (`int`, *optional*, defaults to `None`): if None, sqrt(key tokens) is used.
+        """
+        processor = SubQuadraticCrossAttnProcessor(query_chunk_size, kv_chunk_size)
+
+        self.set_processor(processor)
 
     def set_processor(self, processor: "AttnProcessor"):
         self.processor = processor
@@ -233,6 +248,65 @@ class CrossAttnProcessor:
         hidden_states = attn.to_out[0](hidden_states)
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
+
+        return hidden_states
+
+class SubQuadraticCrossAttnProcessor:
+    query_chunk_size: int
+    kv_chunk_size: Optional[int]
+    def __init__(
+        self,
+        query_chunk_size = 1024,
+        kv_chunk_size: Optional[int] = None
+    ):
+        r"""
+        Args:
+            query_chunk_size (`int`, *optional*, defaults to `1024`)
+            kv_chunk_size (`int`, *optional*, defaults to `None`): if None, sqrt(key tokens) is used.
+        """
+        self.query_chunk_size = query_chunk_size
+        self.kv_chunk_size = kv_chunk_size
+
+    def __call__(
+        self,
+        attn: CrossAttention,
+        hidden_states: Tensor,
+        encoder_hidden_states: Optional[Tensor]=None,
+        attention_mask: Optional[Tensor]=None,
+    ):
+        encoder_hidden_states = hidden_states if encoder_hidden_states is None else encoder_hidden_states
+
+        assert attention_mask is None, "attention-mask not currently tested for SubQuadraticCrossAttnProcessor."
+
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        query = query.unflatten(-1, (attn.heads, -1))
+        key = key.unflatten(-1, (attn.heads, -1))
+        value = value.unflatten(-1, (attn.heads, -1))
+
+        dtype = query.dtype
+        # TODO: do we still need this given how we delay the division?
+        if attn.upcast_attention:
+            query = query.float()
+            key = key.float()
+            value = value.float()
+
+        hidden_states = efficient_dot_product_attention(
+            query,
+            key,
+            value,
+            query_chunk_size=self.query_chunk_size,
+            key_chunk_size=self.kv_chunk_size,
+        )
+        hidden_states = hidden_states.to(dtype)
+
+        hidden_states = hidden_states.flatten(2)
+
+        out_proj, dropout = attn.to_out
+        hidden_states = out_proj(hidden_states)
+        hidden_states = dropout(hidden_states)
 
         return hidden_states
 
