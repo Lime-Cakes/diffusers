@@ -22,7 +22,7 @@ from functools import partial
 import torch
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from ..utils.attention_slicing_utils import dynamic_slice
+from ..utils.dynamic_slice import dynamic_slice
 import math
 from typing import Optional, NamedTuple, Protocol, List
 
