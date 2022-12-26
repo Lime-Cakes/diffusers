@@ -3,12 +3,8 @@
 # license:
 #   unspecified
 # credit:
-#   Amin Rezaei (primary author)
-#   Alex Birch
-#     option to forego checkpointing (not needed during inference)
-#     MPS support
-#     optimizations (batched matmul, fused multiply) (at the expense of support for mask + bias)
-#     typings
+#   Amin Rezaei (original author)
+#   Alex Birch (optimized algorithm for 3D tensors, at the expense of removing bias, masking and callbacks)
 # implementation of:
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
