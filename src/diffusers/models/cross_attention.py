@@ -299,6 +299,7 @@ class SubQuadraticCrossAttnProcessor:
             value,
             query_chunk_size=self.query_chunk_size,
             key_chunk_size=self.kv_chunk_size,
+            use_checkpoint=attn.training,
         )
         hidden_states = hidden_states.to(dtype)
 

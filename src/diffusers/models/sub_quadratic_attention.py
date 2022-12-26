@@ -13,22 +13,26 @@
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
 
+from functools import partial
 import torch
 from torch.utils.checkpoint import checkpoint
 from ..utils.attention_slicing_utils import dynamic_slice, map_pt, scan
 import math
+from typing import Optional
 
 
 def _query_chunk_attention(query_idx, query, key, value,
-                           mask, bias, key_chunk_size=4096,
+                           mask, bias,
+                           key_chunk_size: Optional[int]=None,
                            mask_calc_fn=None,
                            bias_calc_fn=None,
                            weights_calc_fn=None,
-                           calc_fn_data=None):
+                           calc_fn_data=None,
+                           use_checkpoint=True):
     num_kv, num_heads, k_features = key.shape[-3:]
     v_features = value.shape[-1]
     num_q = query.shape[-3]
-    key_chunk_size = min(key_chunk_size, num_kv)
+    key_chunk_size = min(key_chunk_size or int(math.sqrt(num_kv)), num_kv)
     query = query / math.sqrt(k_features)
 
     def summarize_chunk(key_idx, query, key, value, mask, bias):
@@ -53,6 +57,7 @@ def _query_chunk_attention(query_idx, query, key, value,
         exp_values = torch.einsum('...vhf,...qhv->...qhf', value, exp_weights)
         max_score = torch.einsum('...qhk->...qh', max_score)
         return exp_values, exp_weights.sum(dim=-1), max_score
+    summarizer = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
 
     def chunk_scanner(chunk_idx):
         key_chunk = dynamic_slice(key, tuple([0] * (key.ndim - 3)) + (chunk_idx, 0, 0),
@@ -80,7 +85,7 @@ def _query_chunk_attention(query_idx, query, key, value,
         else:
             raise TypeError(f'bias.shape[-1] == {bias.shape[-1]} must broadcast with key.shape[-3] == {num_kv}')
 
-        return checkpoint(summarize_chunk, chunk_idx, query, key_chunk, value_chunk, mask_chunk, bias_chunk)
+        return summarizer(chunk_idx, query, key_chunk, value_chunk, mask_chunk, bias_chunk)
 
     chunk_values, chunk_weights, chunk_max = map_pt(
         chunk_scanner, xs=torch.arange(0, num_kv, key_chunk_size))
@@ -98,11 +103,12 @@ def _query_chunk_attention(query_idx, query, key, value,
 def efficient_dot_product_attention(query, key, value,
                                     mask=None, bias=None,
                                     query_chunk_size=1024,
-                                    key_chunk_size=4096,
+                                    key_chunk_size: Optional[int] = None,
                                     bias_calc_fn=None,
                                     mask_calc_fn=None,
                                     weights_calc_fn=None,
-                                    calc_fn_data=None):
+                                    calc_fn_data=None,
+                                    use_checkpoint=True):
     """Computes efficient dot-product attention given query, key, and value.
       This is efficient version of attention presented in
       https://arxiv.org/abs/2112.05682v2 which comes with O(sqrt(n)) memory requirements.
@@ -173,7 +179,7 @@ def efficient_dot_product_attention(query, key, value,
         return (chunk_idx + query_chunk_size,
                 _query_chunk_attention(chunk_idx, query_chunk, key, value, mask_chunk, bias_chunk, key_chunk_size=key_chunk_size,
                                        bias_calc_fn=bias_calc_fn, mask_calc_fn=mask_calc_fn,
-                                       weights_calc_fn=weights_calc_fn, calc_fn_data=calc_fn_data))
+                                       weights_calc_fn=weights_calc_fn, calc_fn_data=calc_fn_data, use_checkpoint=use_checkpoint))
 
     _, res = scan(chunk_scanner, init=0, xs=None, length=math.ceil(num_q / query_chunk_size))
     rl = [res[i] for i in range(res.shape[0])]
