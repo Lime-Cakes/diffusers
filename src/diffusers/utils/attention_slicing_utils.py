@@ -32,7 +32,8 @@ class AttnChunk(NamedTuple):
     max_score: Tensor
 
 class ChunkScanner(Protocol):
-    def __call__(self, chunk_idx: int) -> AttnChunk: ...
+    @staticmethod
+    def __call__(chunk_idx: int) -> AttnChunk: ...
 
 def map_pt(f: ChunkScanner, xs: List[int]) -> Tuple[Tensor, ...]:
     t = [f(x) for x in xs]
@@ -44,8 +45,8 @@ class ScanOutput(NamedTuple):
     y: Tensor
 
 class ScanCallback(Protocol):
+    @staticmethod
     def __call__(
-        self,
         carry: int,
         value: Tensor,
     ) -> ScanOutput: ...
