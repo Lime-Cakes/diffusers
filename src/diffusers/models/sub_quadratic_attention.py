@@ -4,10 +4,6 @@
 #   unspecified
 # credit:
 #   Amin Rezaei (primary author)
-#   xloem
-#     calc_fn
-#     sparse broadcasting for bias, mask, weights
-#     flattened conditions for clarity
 #   Hyungon Ryu (device arg fix)
 #   Alex Birch
 #     option to forego checkpointing (not needed during inference)
