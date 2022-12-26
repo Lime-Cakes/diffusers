@@ -43,10 +43,10 @@ def _query_chunk_attention(
     key_chunk_size: Optional[int] = None,
     use_checkpoint = True,
 ):
-    num_kv, num_heads, k_features = key.shape[-3:]
-    v_features = value.shape[-1]
-    key_chunk_size = min(key_chunk_size or int(math.sqrt(num_kv)), num_kv)
-    scale = k_features ** -0.5
+    batch_x_heads, k_tokens, k_channels_per_head = key.shape[-3:]
+    v_channels_per_head = value.shape[-1]
+    key_chunk_size = min(key_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
+    scale = k_channels_per_head ** -0.5
 
     def summarize_chunk(
         query: Tensor,
@@ -69,15 +69,21 @@ def _query_chunk_attention(
     summarizer: SummarizeChunk = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
 
     def chunk_scanner(chunk_idx: int) -> AttnChunk:
-        key_chunk = dynamic_slice(key, tuple([0] * (key.ndim - 3)) + (chunk_idx, 0, 0),
-                                  tuple(key.shape[:-3]) + (key_chunk_size, num_heads, k_features))
-        value_chunk = dynamic_slice(value, tuple([0] * (value.ndim - 3)) + (chunk_idx, 0, 0),
-                                    tuple(value.shape[:-3]) + (key_chunk_size, num_heads, v_features))
+        key_chunk = dynamic_slice(
+            key,
+            tuple([0] * (key.ndim - 3)) + (chunk_idx, 0, 0),
+            tuple(key.shape[:-3]) + (batch_x_heads, key_chunk_size, k_channels_per_head)
+        )
+        value_chunk = dynamic_slice(
+            value,
+            tuple([0] * (value.ndim - 3)) + (chunk_idx, 0, 0),
+            tuple(value.shape[:-3]) + (batch_x_heads, key_chunk_size, v_channels_per_head)
+        )
 
         return summarizer(query, key_chunk, value_chunk)
 
     chunk_values, chunk_weights, chunk_max = map_pt(
-        chunk_scanner, xs=torch.arange(0, num_kv, key_chunk_size))
+        chunk_scanner, xs=torch.arange(0, k_tokens, key_chunk_size))
 
     global_max, _ = torch.max(chunk_max, 0, keepdim=True)
     max_diffs = torch.exp(chunk_max - global_max)
@@ -116,16 +122,26 @@ def efficient_dot_product_attention(
       Returns:
         Output of shape `[batch * num_heads, query_tokens, channels_per_head]`.
       """
-    num_q, num_heads, q_features = query.shape[-3:]
+    batch_x_heads, q_tokens, q_channels_per_head = query.shape[-3:]
 
     def chunk_scanner(chunk_idx: int, _) -> AttnChunk:
-        query_chunk = dynamic_slice(query, tuple([0] * (query.ndim - 3)) + (chunk_idx, 0, 0),
-                                    tuple(query.shape[:-3]) + (min(query_chunk_size, num_q), num_heads, q_features))
+        query_chunk = dynamic_slice(
+            query,
+            tuple([0] * (query.ndim - 3)) + (chunk_idx, 0, 0),
+            tuple(query.shape[:-3]) + (batch_x_heads, min(query_chunk_size, q_tokens), q_channels_per_head)
+        )
 
-        return ScannedChunk(chunk_idx + query_chunk_size,
-                _query_chunk_attention(query_chunk, key, value, key_chunk_size=key_chunk_size,
-                                       use_checkpoint=use_checkpoint))
+        return ScannedChunk(
+            chunk_idx + query_chunk_size,
+            _query_chunk_attention(
+                query_chunk,
+                key,
+                value,
+                key_chunk_size=key_chunk_size,
+                use_checkpoint=use_checkpoint,
+            )
+        )
 
-    _, res = scan(chunk_scanner, init=0, xs=None, length=math.ceil(num_q / query_chunk_size))
+    _, res = scan(chunk_scanner, init=0, xs=None, length=math.ceil(q_tokens / query_chunk_size))
     rl: List[Tensor] = [res[i] for i in range(res.shape[0])]
     return torch.cat(rl, dim=-3)
