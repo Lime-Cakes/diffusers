@@ -133,7 +133,7 @@ def efficient_dot_product_attention(
     def chunk_scanner(chunk_idx: int) -> Tensor:
         query_chunk = dynamic_slice(
             query,
-            tuple([0] * (query.ndim - 3)) + (chunk_idx, 0, 0),
+            tuple([0] * (query.ndim - 3)) + (0, chunk_idx, 0),
             tuple(query.shape[:-3]) + (batch_x_heads, min(query_chunk_size, q_tokens), q_channels_per_head)
         )
 
@@ -145,7 +145,7 @@ def efficient_dot_product_attention(
             use_checkpoint=use_checkpoint,
         )
     
-    res = torch.stack([
+    res = torch.cat([
         chunk_scanner(i * query_chunk_size) for i in range(math.ceil(q_tokens / query_chunk_size))
-    ])
-    return res.flatten(end_dim=-3)
+    ], dim=1)
+    return res
