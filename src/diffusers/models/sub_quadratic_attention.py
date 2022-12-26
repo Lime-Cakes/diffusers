@@ -74,13 +74,13 @@ def _query_chunk_attention(
     def chunk_scanner(chunk_idx: int) -> AttnChunk:
         key_chunk = dynamic_slice(
             key,
-            tuple([0] * (key.ndim - 3)) + (0, chunk_idx, 0),
-            tuple(key.shape[:-3]) + (batch_x_heads, key_chunk_size, k_channels_per_head)
+            (0, chunk_idx, 0),
+            (batch_x_heads, key_chunk_size, k_channels_per_head)
         )
         value_chunk = dynamic_slice(
             value,
-            tuple([0] * (value.ndim - 3)) + (0, chunk_idx, 0),
-            tuple(value.shape[:-3]) + (batch_x_heads, key_chunk_size, v_channels_per_head)
+            (0, chunk_idx, 0),
+            (batch_x_heads, key_chunk_size, v_channels_per_head)
         )
 
         return summarizer(query, key_chunk, value_chunk)
@@ -128,13 +128,13 @@ def efficient_dot_product_attention(
       Returns:
         Output of shape `[batch * num_heads, query_tokens, channels_per_head]`.
       """
-    batch_x_heads, q_tokens, q_channels_per_head = query.shape[-3:]
+    batch_x_heads, q_tokens, q_channels_per_head = query.shape
 
     def chunk_scanner(chunk_idx: int) -> Tensor:
         query_chunk = dynamic_slice(
             query,
-            tuple([0] * (query.ndim - 3)) + (0, chunk_idx, 0),
-            tuple(query.shape[:-3]) + (batch_x_heads, min(query_chunk_size, q_tokens), q_channels_per_head)
+            (0, chunk_idx, 0),
+            (batch_x_heads, min(query_chunk_size, q_tokens), q_channels_per_head)
         )
 
         return _query_chunk_attention(
