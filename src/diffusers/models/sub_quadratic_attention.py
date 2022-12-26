@@ -148,6 +148,4 @@ def efficient_dot_product_attention(
     res = torch.stack([
         chunk_scanner(i * query_chunk_size) for i in range(math.ceil(q_tokens / query_chunk_size))
     ])
-
-    rl: List[Tensor] = [res[i] for i in range(res.shape[0])]
-    return torch.cat(rl, dim=-3)
+    return res.flatten(end_dim=-3)
