@@ -288,6 +288,7 @@ class SubQuadraticCrossAttnProcessor:
 
         dtype = query.dtype
         # TODO: do we still need to do *everything* in float32, given how we delay the division?
+        # TODO: do we need to support upcast_softmax too? SD 2.1 seems to work without it
         if attn.upcast_attention:
             query = query.float()
             key = key.float()
