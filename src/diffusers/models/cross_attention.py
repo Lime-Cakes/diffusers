@@ -287,11 +287,10 @@ class SubQuadraticCrossAttnProcessor:
         value = value.unflatten(-1, (attn.heads, -1)).transpose(1,2).flatten(end_dim=1)
 
         dtype = query.dtype
-        # TODO: do we still need this given how we delay the division?
+        # TODO: do we still need to do *everything* in float32, given how we delay the division?
         if attn.upcast_attention:
             query = query.float()
             key = key.float()
-            value = value.float()
 
         hidden_states = efficient_dot_product_attention(
             query,
