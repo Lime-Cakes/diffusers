@@ -28,8 +28,8 @@ from typing import Optional, NamedTuple, Protocol, List
 
 
 class SummarizeChunk(Protocol):
+    @staticmethod
     def __call__(
-        self,
         query: Tensor,
         key: Tensor,
         value: Tensor,
