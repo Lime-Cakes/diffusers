@@ -9,7 +9,10 @@
 #     sparse broadcasting for bias, mask, weights
 #     flattened conditions for clarity
 #   Hyungon Ryu (device arg fix)
-#   Alex Birch (MPS support)
+#   Alex Birch
+#     option to forego checkpointing (not needed during inference)
+#     MPS support
+#     optimizations (batched matmul, fused multiply) (at the expense of support for mask + bias)
 # implementation of:
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
@@ -34,31 +37,40 @@ def _query_chunk_attention(query_idx, query, key, value,
     v_features = value.shape[-1]
     num_q = query.shape[-3]
     key_chunk_size = min(key_chunk_size or int(math.sqrt(num_kv)), num_kv)
-    query = query / math.sqrt(k_features)
+    scale = k_features ** -0.5
 
     def summarize_chunk(key_idx, query, key, value, mask, bias):
-        attn_weights = torch.einsum('...qhd,...khd->...qhk', query, key)
+        attn_weights = torch.baddbmm(
+            torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+            query,
+            key.transpose(1,2),
+            alpha=scale,
+            beta=0,
+        )
         if bias_calc_fn is not None:
+            raise "bias_calc_fn no longer supported" # lost support as a result of migrating to 3D tensors; needs to be reimplemented
             bias = bias_calc_fn(query_idx, key_idx, bias, attn_weights, calc_fn_data)
         if bias is not None:
+            raise "bias no longer supported" # lost support as a result of migrating to 3D tensors; needs to be reimplemented
             bias = torch.einsum('...hqk->...qhk', bias)
             attn_weights = attn_weights + bias
         if mask_calc_fn is not None:
+            raise "mask_calc_fn no longer supported" # lost support as a result of migrating to 3D tensors; needs to be reimplemented
             mask = mask_calc_fn(query_idx, key_idx, mask, attn_weights, calc_fn_data)
         if mask is not None:
+            raise "mask no longer supported" # lost support as a result of migrating to 3D tensors; needs to be reimplemented
             big_neg = torch.finfo(attn_weights.dtype).min
             big_neg = torch.tensor(big_neg, device=mask.device, dtype=torch.float32)
             mask = torch.einsum('...hqk->...qhk', mask)
             attn_weights = torch.where(mask, attn_weights, big_neg)
         if weights_calc_fn is not None:
+            raise "weights_calc_fn no longer supported" # lost support as a result of migrating to 3D tensors; needs to be reimplemented
             attn_weights = weights_calc_fn(query_idx, key_idx, attn_weights, calc_fn_data)
-        attn_weights = attn_weights.contiguous() if attn_weights.device.type == 'mps' else attn_weights
         max_score, _ = torch.max(attn_weights, -1, keepdim=True)
         max_score = max_score.detach()
         exp_weights = torch.exp(attn_weights - max_score)
-        exp_values = torch.einsum('...vhf,...qhv->...qhf', value, exp_weights)
-        max_score = torch.einsum('...qhk->...qh', max_score)
-        exp_values = exp_values.contiguous() if exp_values.device.type == 'mps' else exp_values
+        exp_values = torch.bmm(exp_weights, value)
+        max_score = max_score.squeeze(-1)
         return exp_values, exp_weights.sum(dim=-1), max_score
     summarizer = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
 
@@ -115,14 +127,13 @@ def efficient_dot_product_attention(query, key, value,
     """Computes efficient dot-product attention given query, key, and value.
       This is efficient version of attention presented in
       https://arxiv.org/abs/2112.05682v2 which comes with O(sqrt(n)) memory requirements.
-      Note: query, key, value needn't have any batch dimensions.
       Args:
         query: queries for calculating attention with shape of
-          `[batch..., q_length, num_heads, qk_depth_per_head]`.
+          `[batch * num_heads, tokens, channels_per_head]`.
         key: keys for calculating attention with shape of
-          `[batch..., kv_length, num_heads, qk_depth_per_head]`.
+          `[batch * num_heads, tokens, channels_per_head]`.
         value: values to be used in attention with shape of
-          `[batch..., kv_length, num_heads, v_depth_per_head]`.
+          `[batch * num_heads, tokens, channels_per_head]`.
         bias: bias for the attention weights. This should be broadcastable to the
           shape `[batch..., num_heads, q_length, kv_length]`.
           This can be used for incorporating padding masks, proximity bias, etc.
@@ -150,8 +161,9 @@ def efficient_dot_product_attention(query, key, value,
         calc_fn_data: optional pure data to pass to each per-chunk call of
           bias_calc_fn, mask_calc_fn, and weights_calc_fn.
         weights_calc_data: pure_data to pass with each call to weights_calc_fn
+        use_checkpoint: bool: whether to use checkpointing (recommended True for training, False for inference)
       Returns:
-        Output of shape `[batch..., q_length, num_heads, v_depth_per_head]`.
+        Output of shape `[batch * num_heads, query_tokens, channels_per_head]`.
       """
     num_q, num_heads, q_features = query.shape[-3:]
     num_kv = key.shape[-3]

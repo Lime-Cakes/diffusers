@@ -282,9 +282,9 @@ class SubQuadraticCrossAttnProcessor:
         key = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 
-        query = query.unflatten(-1, (attn.heads, -1))
-        key = key.unflatten(-1, (attn.heads, -1))
-        value = value.unflatten(-1, (attn.heads, -1))
+        query = query.unflatten(-1, (attn.heads, -1)).transpose(1,2).flatten(end_dim=1)
+        key = key.unflatten(-1, (attn.heads, -1)).transpose(1,2).flatten(end_dim=1)
+        value = value.unflatten(-1, (attn.heads, -1)).transpose(1,2).flatten(end_dim=1)
 
         dtype = query.dtype
         # TODO: do we still need this given how we delay the division?
@@ -303,7 +303,7 @@ class SubQuadraticCrossAttnProcessor:
         )
         hidden_states = hidden_states.to(dtype)
 
-        hidden_states = hidden_states.flatten(2)
+        hidden_states = hidden_states.unflatten(0, (-1, attn.heads)).transpose(1,2).flatten(start_dim=2)
 
         out_proj, dropout = attn.to_out
         hidden_states = out_proj(hidden_states)
