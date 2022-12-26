@@ -22,10 +22,14 @@ from functools import partial
 import torch
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from ..utils.attention_slicing_utils import dynamic_slice, map_pt, scan, AttnChunk
+from ..utils.attention_slicing_utils import dynamic_slice
 import math
 from typing import Optional, NamedTuple, Protocol, List
 
+class AttnChunk(NamedTuple):
+    exp_values: Tensor
+    exp_weights_sum: Tensor
+    max_score: Tensor
 
 class SummarizeChunk(Protocol):
     @staticmethod
@@ -34,7 +38,6 @@ class SummarizeChunk(Protocol):
         key: Tensor,
         value: Tensor,
     ) -> AttnChunk: ...
-
 
 def _query_chunk_attention(
     query: Tensor,
@@ -82,8 +85,11 @@ def _query_chunk_attention(
 
         return summarizer(query, key_chunk, value_chunk)
 
-    chunk_values, chunk_weights, chunk_max = map_pt(
-        chunk_scanner, xs=torch.arange(0, k_tokens, key_chunk_size))
+    chunks: List[AttnChunk] = [
+        chunk_scanner(chunk) for chunk in torch.arange(0, k_tokens, key_chunk_size)
+    ]
+    acc_chunk = AttnChunk(*map(torch.stack, zip(*chunks)))
+    chunk_values, chunk_weights, chunk_max = acc_chunk
 
     global_max, _ = torch.max(chunk_max, 0, keepdim=True)
     max_diffs = torch.exp(chunk_max - global_max)
@@ -143,6 +149,5 @@ def efficient_dot_product_attention(
         chunk_scanner(i * query_chunk_size) for i in range(math.ceil(q_tokens / query_chunk_size))
     ])
 
-    # _, res = scan(chunk_scanner, init=0, xs=None, length=math.ceil(q_tokens / query_chunk_size))
     rl: List[Tensor] = [res[i] for i in range(res.shape[0])]
     return torch.cat(rl, dim=-3)

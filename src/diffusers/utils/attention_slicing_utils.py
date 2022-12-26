@@ -5,14 +5,12 @@
 # credit:
 #   Amin Rezaei (primary author)
 #   Hyungon Ryu (device arg fix)
-#   Alex Birch (typings)
+#   Alex Birch (typings, deleted everything)
 # implementation of:
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
-import torch
 from torch import Tensor
-from typing import Protocol, NamedTuple, Iterable, Optional, List, Tuple
-
+from typing import List
 
 def dynamic_slice(
     x: Tensor,
@@ -21,17 +19,3 @@ def dynamic_slice(
 ) -> Tensor:
     slicing = [slice(start, start + size + 1) for start, size in zip(starts, sizes)]
     return x[slicing]
-
-class AttnChunk(NamedTuple):
-    exp_values: Tensor
-    exp_weights_sum: Tensor
-    max_score: Tensor
-
-class ChunkScanner(Protocol):
-    @staticmethod
-    def __call__(chunk_idx: int) -> AttnChunk: ...
-
-def map_pt(f: ChunkScanner, xs: List[int]) -> Tuple[Tensor, ...]:
-    t = [f(x) for x in xs]
-    return tuple(map(torch.stack, zip(*t)))
-
