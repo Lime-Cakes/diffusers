@@ -9,6 +9,7 @@
 #     sparse broadcasting for bias, mask, weights
 #     flattened conditions for clarity
 #   Hyungon Ryu (device arg fix)
+#   Alex Birch (MPS support)
 # implementation of:
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
@@ -51,11 +52,13 @@ def _query_chunk_attention(query_idx, query, key, value,
             attn_weights = torch.where(mask, attn_weights, big_neg)
         if weights_calc_fn is not None:
             attn_weights = weights_calc_fn(query_idx, key_idx, attn_weights, calc_fn_data)
+        attn_weights = attn_weights.contiguous() if attn_weights.device.type == 'mps' else attn_weights
         max_score, _ = torch.max(attn_weights, -1, keepdim=True)
         max_score = max_score.detach()
         exp_weights = torch.exp(attn_weights - max_score)
         exp_values = torch.einsum('...vhf,...qhv->...qhf', value, exp_weights)
         max_score = torch.einsum('...qhk->...qh', max_score)
+        exp_values = exp_values.contiguous() if exp_values.device.type == 'mps' else exp_values
         return exp_values, exp_weights.sum(dim=-1), max_score
     summarizer = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
 
