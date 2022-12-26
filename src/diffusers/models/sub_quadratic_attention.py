@@ -124,24 +124,25 @@ def efficient_dot_product_attention(
       """
     batch_x_heads, q_tokens, q_channels_per_head = query.shape[-3:]
 
-    def chunk_scanner(chunk_idx: int, _) -> AttnChunk:
+    def chunk_scanner(chunk_idx: int) -> Tensor:
         query_chunk = dynamic_slice(
             query,
             tuple([0] * (query.ndim - 3)) + (chunk_idx, 0, 0),
             tuple(query.shape[:-3]) + (batch_x_heads, min(query_chunk_size, q_tokens), q_channels_per_head)
         )
 
-        return ScannedChunk(
-            chunk_idx + query_chunk_size,
-            _query_chunk_attention(
-                query_chunk,
-                key,
-                value,
-                key_chunk_size=key_chunk_size,
-                use_checkpoint=use_checkpoint,
-            )
+        return _query_chunk_attention(
+            query_chunk,
+            key,
+            value,
+            key_chunk_size=key_chunk_size,
+            use_checkpoint=use_checkpoint,
         )
+    
+    res = torch.stack([
+        chunk_scanner(i * query_chunk_size) for i in range(math.ceil(q_tokens / query_chunk_size))
+    ])
 
-    _, res = scan(chunk_scanner, init=0, xs=None, length=math.ceil(q_tokens / query_chunk_size))
+    # _, res = scan(chunk_scanner, init=0, xs=None, length=math.ceil(q_tokens / query_chunk_size))
     rl: List[Tensor] = [res[i] for i in range(res.shape[0])]
     return torch.cat(rl, dim=-3)

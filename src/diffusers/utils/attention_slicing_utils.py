@@ -35,30 +35,3 @@ def map_pt(f: ChunkScanner, xs: List[int]) -> Tuple[Tensor, ...]:
     t = [f(x) for x in xs]
     return tuple(map(torch.stack, zip(*t)))
 
-
-class ScanOutput(NamedTuple):
-    carry: int
-    y: Tensor
-
-class ScanCallback(Protocol):
-    @staticmethod
-    def __call__(
-        carry: int,
-        value: Tensor,
-    ) -> ScanOutput: ...
-
-
-def scan(
-    f: ScanCallback,
-    init: int,
-    xs: Optional[Iterable[Tensor]],
-    length: Optional[int] = None
-):
-    if xs is None:
-        xs: List[Tensor] = [None] * length
-    carry: int = init
-    ys: List[Tensor] = []
-    for x in xs:
-        carry, y = f(carry, x)
-        ys.append(y)
-    return carry, torch.stack(ys)
