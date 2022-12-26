@@ -276,7 +276,7 @@ class SubQuadraticCrossAttnProcessor:
     ):
         encoder_hidden_states = hidden_states if encoder_hidden_states is None else encoder_hidden_states
 
-        assert attention_mask is None, "attention-mask not currently tested for SubQuadraticCrossAttnProcessor."
+        assert attention_mask is None, "attention-mask not currently implemented for SubQuadraticCrossAttnProcessor."
 
         query = attn.to_q(hidden_states)
         key = attn.to_k(encoder_hidden_states)
