@@ -10,7 +10,6 @@
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
 import torch
-import numpy as np
 from torch import Tensor
 from typing import Protocol, NamedTuple, Iterable, Optional, List, Tuple
 
@@ -20,10 +19,8 @@ def dynamic_slice(
     starts: List[int],
     sizes: List[int],
 ) -> Tensor:
-    starts: List[int] = [np.clip(starts[i], 0, x.shape[i] - sizes[i]) for i in range(len(starts))]
-    for i, (start, size) in enumerate(zip(starts, sizes)):
-        x = torch.index_select(x, i, torch.tensor(range(start, start + size), device=x.device))
-    return x
+    slicing = [slice(start, start + size + 1) for start, size in zip(starts, sizes)]
+    return x[slicing]
 
 class AttnChunk(NamedTuple):
     exp_values: Tensor
