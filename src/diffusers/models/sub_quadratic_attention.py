@@ -4,7 +4,6 @@
 #   unspecified
 # credit:
 #   Amin Rezaei (primary author)
-#   Hyungon Ryu (device arg fix)
 #   Alex Birch
 #     option to forego checkpointing (not needed during inference)
 #     MPS support
