@@ -17,9 +17,9 @@ from functools import partial
 import torch
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from ..utils.dynamic_slice import dynamic_slice
 import math
 from typing import Optional, NamedTuple, Protocol, List
+from ..utils.dynamic_slice import dynamic_slice
 
 class AttnChunk(NamedTuple):
     exp_values: Tensor
@@ -41,8 +41,8 @@ def _query_chunk_attention(
     key_chunk_size: Optional[int] = None,
     use_checkpoint = True,
 ):
-    batch_x_heads, k_tokens, k_channels_per_head = key.shape[-3:]
-    v_channels_per_head = value.shape[-1]
+    batch_x_heads, k_tokens, k_channels_per_head = key.shape
+    _, _, v_channels_per_head = value.shape
     key_chunk_size = min(key_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
     scale = k_channels_per_head ** -0.5
 
