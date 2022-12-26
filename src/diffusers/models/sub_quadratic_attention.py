@@ -74,12 +74,12 @@ def _query_chunk_attention(
     def chunk_scanner(chunk_idx: int) -> AttnChunk:
         key_chunk = dynamic_slice(
             key,
-            tuple([0] * (key.ndim - 3)) + (chunk_idx, 0, 0),
+            tuple([0] * (key.ndim - 3)) + (0, chunk_idx, 0),
             tuple(key.shape[:-3]) + (batch_x_heads, key_chunk_size, k_channels_per_head)
         )
         value_chunk = dynamic_slice(
             value,
-            tuple([0] * (value.ndim - 3)) + (chunk_idx, 0, 0),
+            tuple([0] * (value.ndim - 3)) + (0, chunk_idx, 0),
             tuple(value.shape[:-3]) + (batch_x_heads, key_chunk_size, v_channels_per_head)
         )
 
