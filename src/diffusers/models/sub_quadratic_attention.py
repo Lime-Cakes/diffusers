@@ -166,6 +166,7 @@ def efficient_dot_product_attention(
         _get_attention_scores_no_kv_chunking,
         scale=scale
     ) if k_tokens <= kv_chunk_size else (
+        # fast-path for when there's just 1 key-value chunk per query chunk (this is just sliced attention btw)
         partial(
             _query_chunk_attention,
             kv_chunk_size=kv_chunk_size,
