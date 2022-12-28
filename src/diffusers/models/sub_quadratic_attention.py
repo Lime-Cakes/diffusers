@@ -173,6 +173,14 @@ def efficient_dot_product_attention(
             summarize_chunk=summarize_chunk,
         )
     )
+
+    if q_tokens <= query_chunk_size:
+        # fast-path for when there's just 1 query chunk
+        return compute_query_chunk_attn(
+            query=query,
+            key=key,
+            value=value,
+        )
     
     # TODO: maybe we should use torch.empty_like(query) to allocate storage in-advance,
     # and pass slices to be mutated, instead of torch.cat()ing the returned slices
