@@ -34,12 +34,15 @@ def _query_chunk_attention(
     query: Tensor,
     key: Tensor,
     value: Tensor,
-    key_chunk_size: Optional[int] = None,
+    kv_chunk_size: Optional[int] = None,
+    kv_chunk_size_min: Optional[int] = None,
     use_checkpoint = True,
 ):
     batch_x_heads, k_tokens, k_channels_per_head = key.shape
     _, _, v_channels_per_head = value.shape
-    key_chunk_size = min(key_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
+    kv_chunk_size = min(kv_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
+    if kv_chunk_size_min is not None:
+        kv_chunk_size = max(kv_chunk_size, kv_chunk_size_min)
     scale = k_channels_per_head ** -0.5
 
     def summarize_chunk(
@@ -66,18 +69,18 @@ def _query_chunk_attention(
         key_chunk = dynamic_slice(
             key,
             (0, chunk_idx, 0),
-            (batch_x_heads, key_chunk_size, k_channels_per_head)
+            (batch_x_heads, kv_chunk_size, k_channels_per_head)
         )
         value_chunk = dynamic_slice(
             value,
             (0, chunk_idx, 0),
-            (batch_x_heads, key_chunk_size, v_channels_per_head)
+            (batch_x_heads, kv_chunk_size, v_channels_per_head)
         )
 
         return summarizer(query, key_chunk, value_chunk)
 
     chunks: List[AttnChunk] = [
-        chunk_scanner(chunk) for chunk in torch.arange(0, k_tokens, key_chunk_size)
+        chunk_scanner(chunk) for chunk in torch.arange(0, k_tokens, kv_chunk_size)
     ]
     acc_chunk = AttnChunk(*map(torch.stack, zip(*chunks)))
     chunk_values, chunk_weights, chunk_max = acc_chunk
@@ -100,7 +103,8 @@ def efficient_dot_product_attention(
     key: Tensor,
     value: Tensor,
     query_chunk_size=1024,
-    key_chunk_size: Optional[int] = None,
+    kv_chunk_size: Optional[int] = None,
+    kv_chunk_size_min: Optional[int] = None,
     use_checkpoint=True,
 ):
     """Computes efficient dot-product attention given query, key, and value.
@@ -114,7 +118,8 @@ def efficient_dot_product_attention(
         value: values to be used in attention with shape of
           `[batch * num_heads, tokens, channels_per_head]`.
         query_chunk_size: int: query chunks size
-        key_chunk_size: int: key chunks size
+        kv_chunk_size: Optional[int]: key/value chunks size. if None: defaults to sqrt(key_tokens)
+        kv_chunk_size_min: Optional[int]: key/value minimum chunk size. only considered when kv_chunk_size is None. changes `sqrt(key_tokens)` into `max(sqrt(key_tokens), kv_chunk_size_min)`, to ensure our chunk sizes don't get too small (smaller chunks = more chunks = less concurrent work done).
         use_checkpoint: bool: whether to use checkpointing (recommended True for training, False for inference)
       Returns:
         Output of shape `[batch * num_heads, query_tokens, channels_per_head]`.
@@ -132,7 +137,8 @@ def efficient_dot_product_attention(
             query_chunk,
             key,
             value,
-            key_chunk_size=key_chunk_size,
+            kv_chunk_size=kv_chunk_size,
+            kv_chunk_size_min=kv_chunk_size_min,
             use_checkpoint=use_checkpoint,
         )
     

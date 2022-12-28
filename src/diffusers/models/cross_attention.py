@@ -151,13 +151,22 @@ class CrossAttention(nn.Module):
         self,
         query_chunk_size = 1024,
         kv_chunk_size: Optional[int] = None,
+        kv_chunk_size_min: Optional[int] = None,
+        chunk_threshold_bytes: Optional[int] = None,
     ):
         r"""
         Args:
             query_chunk_size (`int`, *optional*, defaults to `1024`)
-            kv_chunk_size (`int`, *optional*, defaults to `None`): if None, sqrt(key tokens) is used.
+            kv_chunk_size (`int`, *optional*, defaults to `None`): if None, sqrt(key_tokens) is used.
+            kv_chunk_size_min (`int`, *optional*, defaults to `None`): only considered when `kv_chunk_size is None`. changes `sqrt(key_tokens)` into `max(sqrt(key_tokens), kv_chunk_size_min)`, to ensure our chunk sizes don't get too small (smaller chunks = more chunks = less concurrent work done).
+            chunk_threshold_bytes (`int`, *optional*, defaults to `None`): if defined: only bother chunking if the self-attn matmul would allocate more bytes than this. whenever we can fit traditional attention into memory: we should prefer to do so, as the unchunked algorithm is faster.
         """
-        processor = SubQuadraticCrossAttnProcessor(query_chunk_size, kv_chunk_size)
+        processor = SubQuadraticCrossAttnProcessor(
+            query_chunk_size=query_chunk_size,
+            kv_chunk_size=kv_chunk_size,
+            kv_chunk_size_min=kv_chunk_size_min,
+            chunk_threshold_bytes=chunk_threshold_bytes,
+        )
 
         self.set_processor(processor)
 
@@ -254,18 +263,26 @@ class CrossAttnProcessor:
 class SubQuadraticCrossAttnProcessor:
     query_chunk_size: int
     kv_chunk_size: Optional[int]
+    kv_chunk_size_min: Optional[int]
+    chunk_threshold_bytes: Optional[int]
     def __init__(
         self,
         query_chunk_size = 1024,
-        kv_chunk_size: Optional[int] = None
+        kv_chunk_size: Optional[int] = None,
+        kv_chunk_size_min: Optional[int] = None,
+        chunk_threshold_bytes: Optional[int] = None,
     ):
         r"""
         Args:
             query_chunk_size (`int`, *optional*, defaults to `1024`)
-            kv_chunk_size (`int`, *optional*, defaults to `None`): if None, sqrt(key tokens) is used.
+            kv_chunk_size (`int`, *optional*, defaults to `None`): if None, sqrt(key_tokens) is used.
+            kv_chunk_size_min (`int`, *optional*, defaults to `None`): only considered when `kv_chunk_size is None`. changes `sqrt(key_tokens)` into `max(sqrt(key_tokens), kv_chunk_size_min)`, to ensure our chunk sizes don't get too small (smaller chunks = more chunks = less concurrent work done).
+            chunk_threshold_bytes (`int`, *optional*, defaults to `None`): if defined: only bother chunking if the self-attn matmul would allocate more bytes than this. whenever we can fit traditional attention into memory: we should prefer to do so, as the unchunked algorithm is faster.
         """
         self.query_chunk_size = query_chunk_size
         self.kv_chunk_size = kv_chunk_size
+        self.kv_chunk_size_min = kv_chunk_size_min
+        self.chunk_threshold_bytes = chunk_threshold_bytes
 
     def __call__(
         self,
@@ -277,6 +294,9 @@ class SubQuadraticCrossAttnProcessor:
         encoder_hidden_states = hidden_states if encoder_hidden_states is None else encoder_hidden_states
 
         assert attention_mask is None, "attention-mask not currently implemented for SubQuadraticCrossAttnProcessor."
+        # I don't know what test case can be used to determine whether softmax is computed at sufficient bit-width,
+        # but sub-quadratic attention has a pretty bespoke softmax (defers computation of the denominator) so this needs some thought.
+        assert not attn.upcast_softmax or torch.finfo(hidden_states.dtype).bits >= 32, "upcast_softmax was requested, but is not implemented"
 
         query = attn.to_q(hidden_states)
         key = attn.to_k(encoder_hidden_states)
@@ -293,14 +313,29 @@ class SubQuadraticCrossAttnProcessor:
             query = query.float()
             key = key.float()
 
-        hidden_states = efficient_dot_product_attention(
-            query,
-            key,
-            value,
-            query_chunk_size=self.query_chunk_size,
-            key_chunk_size=self.kv_chunk_size,
-            use_checkpoint=attn.training,
-        )
+        bytes_per_token = torch.finfo(query.dtype).bits//8
+        batch_x_heads, q_tokens, _ = query.shape
+        _, k_tokens, _ = key.shape
+        qk_matmul_size_bytes = batch_x_heads * bytes_per_token * q_tokens * k_tokens
+
+        if self.chunk_threshold_bytes is None or qk_matmul_size_bytes > self.chunk_threshold_bytes:
+            hidden_states = efficient_dot_product_attention(
+                query,
+                key,
+                value,
+                query_chunk_size=self.query_chunk_size,
+                kv_chunk_size=self.kv_chunk_size,
+                kv_chunk_size_min=self.kv_chunk_size_min,
+                use_checkpoint=attn.training,
+            )
+        else:
+            # the big matmul fits into our memory limit; compute via unchunked attention (it's faster)
+            attention_probs = attn.get_attention_scores(
+                query,
+                key,
+            )
+            hidden_states = torch.bmm(attention_probs, value)
+
         hidden_states = hidden_states.to(dtype)
 
         hidden_states = hidden_states.unflatten(0, (-1, attn.heads)).transpose(1,2).flatten(start_dim=2)
