@@ -318,23 +318,24 @@ class SubQuadraticCrossAttnProcessor:
         _, k_tokens, _ = key.shape
         qk_matmul_size_bytes = batch_x_heads * bytes_per_token * q_tokens * k_tokens
 
-        if self.chunk_threshold_bytes is None or qk_matmul_size_bytes > self.chunk_threshold_bytes:
-            hidden_states = efficient_dot_product_attention(
-                query,
-                key,
-                value,
-                query_chunk_size=self.query_chunk_size,
-                kv_chunk_size=self.kv_chunk_size,
-                kv_chunk_size_min=self.kv_chunk_size_min,
-                use_checkpoint=attn.training,
-            )
-        else:
-            # the big matmul fits into our memory limit; compute via unchunked attention (it's faster)
-            attention_probs = attn.get_attention_scores(
-                query,
-                key,
-            )
-            hidden_states = torch.bmm(attention_probs, value)
+        query_chunk_size = self.query_chunk_size
+        kv_chunk_size = self.kv_chunk_size
+
+        if self.chunk_threshold_bytes is not None and qk_matmul_size_bytes <= self.chunk_threshold_bytes:
+            # the big matmul fits into our memory limit; do everything in 1 chunk,
+            # i.e. send it down the unchunked fast-path
+            query_chunk_size = q_tokens
+            kv_chunk_size = k_tokens
+
+        hidden_states = efficient_dot_product_attention(
+            query,
+            key,
+            value,
+            query_chunk_size=query_chunk_size,
+            kv_chunk_size=kv_chunk_size,
+            kv_chunk_size_min=self.kv_chunk_size_min,
+            use_checkpoint=attn.training,
+        )
 
         hidden_states = hidden_states.to(dtype)
 
