@@ -30,40 +30,43 @@ class SummarizeChunk(Protocol):
         value: Tensor,
     ) -> AttnChunk: ...
 
+class ComputeQueryChunkAttn(Protocol):
+    @staticmethod
+    def __call__(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+    ) -> Tensor: ...
+
+def _summarize_chunk(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    scale: float,
+) -> AttnChunk:
+    attn_weights = torch.baddbmm(
+        torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+        query,
+        key.transpose(1,2),
+        alpha=scale,
+        beta=0,
+    )
+    max_score, _ = torch.max(attn_weights, -1, keepdim=True)
+    max_score = max_score.detach()
+    exp_weights = torch.exp(attn_weights - max_score)
+    exp_values = torch.bmm(exp_weights, value)
+    max_score = max_score.squeeze(-1)
+    return AttnChunk(exp_values, exp_weights.sum(dim=-1), max_score)
+
 def _query_chunk_attention(
     query: Tensor,
     key: Tensor,
     value: Tensor,
-    kv_chunk_size: Optional[int] = None,
-    kv_chunk_size_min: Optional[int] = None,
-    use_checkpoint = True,
-):
+    summarize_chunk: SummarizeChunk,
+    kv_chunk_size: int,
+) -> Tensor:
     batch_x_heads, k_tokens, k_channels_per_head = key.shape
     _, _, v_channels_per_head = value.shape
-    kv_chunk_size = min(kv_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
-    if kv_chunk_size_min is not None:
-        kv_chunk_size = max(kv_chunk_size, kv_chunk_size_min)
-    scale = k_channels_per_head ** -0.5
-
-    def summarize_chunk(
-        query: Tensor,
-        key: Tensor,
-        value: Tensor,
-    ) -> AttnChunk:
-        attn_weights = torch.baddbmm(
-            torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
-            query,
-            key.transpose(1,2),
-            alpha=scale,
-            beta=0,
-        )
-        max_score, _ = torch.max(attn_weights, -1, keepdim=True)
-        max_score = max_score.detach()
-        exp_weights = torch.exp(attn_weights - max_score)
-        exp_values = torch.bmm(exp_weights, value)
-        max_score = max_score.squeeze(-1)
-        return AttnChunk(exp_values, exp_weights.sum(dim=-1), max_score)
-    summarizer: SummarizeChunk = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
 
     def chunk_scanner(chunk_idx: int) -> AttnChunk:
         key_chunk = dynamic_slice(
@@ -76,23 +79,7 @@ def _query_chunk_attention(
             (0, chunk_idx, 0),
             (batch_x_heads, kv_chunk_size, v_channels_per_head)
         )
-
-        return summarizer(query, key_chunk, value_chunk)
-
-    if k_tokens <= kv_chunk_size:
-        # fast-path for when there's only one chunk
-        # this is literally just attention slicing btw
-        attn_scores = torch.baddbmm(
-            torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
-            query,
-            key.transpose(1,2),
-            alpha=scale,
-            beta=0,
-        )
-        attn_probs = attn_scores.softmax(dim=-1)
-        del attn_scores
-        hidden_states_slice = torch.bmm(attn_probs, value)
-        return hidden_states_slice
+        return summarize_chunk(query, key_chunk, value_chunk)
 
     chunks: List[AttnChunk] = [
         chunk_scanner(chunk) for chunk in torch.arange(0, k_tokens, kv_chunk_size)
@@ -108,6 +95,25 @@ def _query_chunk_attention(
     all_values = chunk_values.sum(dim=0) # this is just c[0]
     all_weights = torch.unsqueeze(chunk_weights, -1).sum(dim=0) # this is just c[1]
     return all_values / all_weights # so just c[0] / c[1]; don't need c[2]
+
+# TODO: refactor CrossAttention#get_attention_scores to share code with this
+def _get_attention_scores_no_kv_chunking(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    scale: float,
+) -> Tensor:
+    attn_scores = torch.baddbmm(
+        torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+        query,
+        key.transpose(1,2),
+        alpha=scale,
+        beta=0,
+    )
+    attn_probs = attn_scores.softmax(dim=-1)
+    del attn_scores
+    hidden_states_slice = torch.bmm(attn_probs, value)
+    return hidden_states_slice
 
 class ScannedChunk(NamedTuple):
     chunk_idx: int
@@ -140,24 +146,40 @@ def efficient_dot_product_attention(
         Output of shape `[batch * num_heads, query_tokens, channels_per_head]`.
       """
     batch_x_heads, q_tokens, q_channels_per_head = query.shape
+    _, k_tokens, _ = key.shape
+    scale = q_channels_per_head ** -0.5
 
-    def chunk_scanner(chunk_idx: int) -> Tensor:
-        query_chunk = dynamic_slice(
+    kv_chunk_size = min(kv_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
+    if kv_chunk_size_min is not None:
+        kv_chunk_size = max(kv_chunk_size, kv_chunk_size_min)
+
+    def get_query_chunk(chunk_idx: int) -> Tensor:
+        return dynamic_slice(
             query,
             (0, chunk_idx, 0),
             (batch_x_heads, min(query_chunk_size, q_tokens), q_channels_per_head)
         )
-
-        return _query_chunk_attention(
-            query_chunk,
-            key,
-            value,
-            kv_chunk_size=kv_chunk_size,
-            kv_chunk_size_min=kv_chunk_size_min,
-            use_checkpoint=use_checkpoint,
-        )
     
+    summarize_chunk: SummarizeChunk = partial(_summarize_chunk, scale=scale)
+    summarize_chunk: SummarizeChunk = partial(checkpoint, summarize_chunk) if use_checkpoint else summarize_chunk
+    compute_query_chunk_attn: ComputeQueryChunkAttn = partial(
+        _get_attention_scores_no_kv_chunking,
+        scale=scale
+    ) if k_tokens <= kv_chunk_size else (
+        partial(
+            _query_chunk_attention,
+            kv_chunk_size=kv_chunk_size,
+            summarize_chunk=summarize_chunk,
+        )
+    )
+    
+    # TODO: maybe we should use torch.empty_like(query) to allocate storage in-advance,
+    # and pass slices to be mutated, instead of torch.cat()ing the returned slices
     res = torch.cat([
-        chunk_scanner(i * query_chunk_size) for i in range(math.ceil(q_tokens / query_chunk_size))
+        compute_query_chunk_attn(
+            query=get_query_chunk(i * query_chunk_size),
+            key=key,
+            value=value,
+        ) for i in range(math.ceil(q_tokens / query_chunk_size))
     ], dim=1)
     return res
