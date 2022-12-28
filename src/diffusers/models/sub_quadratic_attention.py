@@ -125,7 +125,6 @@ def efficient_dot_product_attention(
     value: Tensor,
     query_chunk_size=1024,
     kv_chunk_size: Optional[int] = None,
-    kv_chunk_size_min: Optional[int] = None,
     use_checkpoint=True,
 ):
     """Computes efficient dot-product attention given query, key, and value.
@@ -140,7 +139,6 @@ def efficient_dot_product_attention(
           `[batch * num_heads, tokens, channels_per_head]`.
         query_chunk_size: int: query chunks size
         kv_chunk_size: Optional[int]: key/value chunks size. if None: defaults to sqrt(key_tokens)
-        kv_chunk_size_min: Optional[int]: key/value minimum chunk size. only considered when kv_chunk_size is None. changes `sqrt(key_tokens)` into `max(sqrt(key_tokens), kv_chunk_size_min)`, to ensure our chunk sizes don't get too small (smaller chunks = more chunks = less concurrent work done).
         use_checkpoint: bool: whether to use checkpointing (recommended True for training, False for inference)
       Returns:
         Output of shape `[batch * num_heads, query_tokens, channels_per_head]`.
@@ -148,10 +146,6 @@ def efficient_dot_product_attention(
     batch_x_heads, q_tokens, q_channels_per_head = query.shape
     _, k_tokens, _ = key.shape
     scale = q_channels_per_head ** -0.5
-
-    kv_chunk_size = min(kv_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
-    if kv_chunk_size_min is not None:
-        kv_chunk_size = max(kv_chunk_size, kv_chunk_size_min)
 
     def get_query_chunk(chunk_idx: int) -> Tensor:
         return dynamic_slice(

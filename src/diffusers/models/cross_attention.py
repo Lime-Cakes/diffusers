@@ -17,6 +17,7 @@ from .sub_quadratic_attention import efficient_dot_product_attention
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+import math
 
 from ..utils.import_utils import is_xformers_available
 
@@ -318,14 +319,19 @@ class SubQuadraticCrossAttnProcessor:
         _, k_tokens, _ = key.shape
         qk_matmul_size_bytes = batch_x_heads * bytes_per_token * q_tokens * k_tokens
 
-        if self.chunk_threshold_bytes is None or qk_matmul_size_bytes > self.chunk_threshold_bytes:
+        kv_chunk_size = min(self.kv_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
+        if self.kv_chunk_size_min is not None:
+            kv_chunk_size = max(kv_chunk_size, self.kv_chunk_size_min)
+        
+        uses_chunking = q_tokens > self.query_chunk_size or k_tokens > kv_chunk_size
+
+        if uses_chunking and (self.chunk_threshold_bytes is None or qk_matmul_size_bytes > self.chunk_threshold_bytes):
             hidden_states = efficient_dot_product_attention(
                 query,
                 key,
                 value,
                 query_chunk_size=self.query_chunk_size,
-                kv_chunk_size=self.kv_chunk_size,
-                kv_chunk_size_min=self.kv_chunk_size_min,
+                kv_chunk_size=kv_chunk_size,
                 use_checkpoint=attn.training,
             )
         else:
