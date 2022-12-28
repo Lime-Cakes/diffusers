@@ -79,20 +79,35 @@ def _query_chunk_attention(
 
         return summarizer(query, key_chunk, value_chunk)
 
+    if k_tokens <= kv_chunk_size:
+        # fast-path for when there's only one chunk
+        # this is literally just attention slicing btw
+        attn_scores = torch.baddbmm(
+            torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
+            query,
+            key.transpose(1,2),
+            alpha=scale,
+            beta=0,
+        )
+        attn_probs = attn_scores.softmax(dim=-1)
+        del attn_scores
+        hidden_states_slice = torch.bmm(attn_probs, value)
+        return hidden_states_slice
+
     chunks: List[AttnChunk] = [
         chunk_scanner(chunk) for chunk in torch.arange(0, k_tokens, kv_chunk_size)
     ]
     acc_chunk = AttnChunk(*map(torch.stack, zip(*chunks)))
     chunk_values, chunk_weights, chunk_max = acc_chunk
 
-    global_max, _ = torch.max(chunk_max, 0, keepdim=True)
-    max_diffs = torch.exp(chunk_max - global_max)
-    chunk_values *= torch.unsqueeze(max_diffs, -1)
-    chunk_weights *= max_diffs
+    global_max, _ = torch.max(chunk_max, 0, keepdim=True) # this is just c[2].unsqueeze(0)
+    max_diffs = torch.exp(chunk_max - global_max) # this is ones_like(c[2].unsqueeze(0))
+    chunk_values *= torch.unsqueeze(max_diffs, -1) # this is a no-op I suppose
+    chunk_weights *= max_diffs # this is a no-op I suppose
 
-    all_values = chunk_values.sum(dim=0)
-    all_weights = torch.unsqueeze(chunk_weights, -1).sum(dim=0)
-    return all_values / all_weights
+    all_values = chunk_values.sum(dim=0) # this is just c[0]
+    all_weights = torch.unsqueeze(chunk_weights, -1).sum(dim=0) # this is just c[1]
+    return all_values / all_weights # so just c[0] / c[1]; don't need c[2]
 
 class ScannedChunk(NamedTuple):
     chunk_idx: int
