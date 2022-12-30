@@ -303,7 +303,8 @@ class SubQuadraticCrossAttnProcessor:
         value = attn.to_v(encoder_hidden_states)
 
         query = query.unflatten(-1, (attn.heads, -1)).transpose(1,2).flatten(end_dim=1)
-        key = key.unflatten(-1, (attn.heads, -1)).transpose(1,2).flatten(end_dim=1)
+        key_t = key.transpose(1,2).unflatten(1, (attn.heads, -1)).flatten(end_dim=1)
+        del key
         value = value.unflatten(-1, (attn.heads, -1)).transpose(1,2).flatten(end_dim=1)
 
         dtype = query.dtype
@@ -311,11 +312,11 @@ class SubQuadraticCrossAttnProcessor:
         # TODO: do we need to support upcast_softmax too? SD 2.1 seems to work without it
         if attn.upcast_attention:
             query = query.float()
-            key = key.float()
+            key_t = key_t.float()
 
         bytes_per_token = torch.finfo(query.dtype).bits//8
         batch_x_heads, q_tokens, _ = query.shape
-        _, k_tokens, _ = key.shape
+        _, _, k_tokens = key_t.shape
         qk_matmul_size_bytes = batch_x_heads * bytes_per_token * q_tokens * k_tokens
 
         query_chunk_size = self.query_chunk_size
@@ -329,7 +330,7 @@ class SubQuadraticCrossAttnProcessor:
 
         hidden_states = efficient_dot_product_attention(
             query,
-            key,
+            key_t,
             value,
             query_chunk_size=query_chunk_size,
             kv_chunk_size=kv_chunk_size,

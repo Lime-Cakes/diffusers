@@ -26,7 +26,7 @@ class SummarizeChunk(Protocol):
     @staticmethod
     def __call__(
         query: Tensor,
-        key: Tensor,
+        key_t: Tensor,
         value: Tensor,
     ) -> AttnChunk: ...
 
@@ -34,20 +34,20 @@ class ComputeQueryChunkAttn(Protocol):
     @staticmethod
     def __call__(
         query: Tensor,
-        key: Tensor,
+        key_t: Tensor,
         value: Tensor,
     ) -> Tensor: ...
 
 def _summarize_chunk(
     query: Tensor,
-    key: Tensor,
+    key_t: Tensor,
     value: Tensor,
     scale: float,
 ) -> AttnChunk:
     attn_weights = torch.baddbmm(
         torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
         query,
-        key.transpose(1,2),
+        key_t,
         alpha=scale,
         beta=0,
     )
@@ -60,19 +60,19 @@ def _summarize_chunk(
 
 def _query_chunk_attention(
     query: Tensor,
-    key: Tensor,
+    key_t: Tensor,
     value: Tensor,
     summarize_chunk: SummarizeChunk,
     kv_chunk_size: int,
 ) -> Tensor:
-    batch_x_heads, k_tokens, k_channels_per_head = key.shape
+    batch_x_heads, k_channels_per_head, k_tokens = key_t.shape
     _, _, v_channels_per_head = value.shape
 
     def chunk_scanner(chunk_idx: int) -> AttnChunk:
         key_chunk = dynamic_slice(
-            key,
-            (0, chunk_idx, 0),
-            (batch_x_heads, kv_chunk_size, k_channels_per_head)
+            key_t,
+            (0, 0, chunk_idx),
+            (batch_x_heads, k_channels_per_head, kv_chunk_size)
         )
         value_chunk = dynamic_slice(
             value,
@@ -99,14 +99,14 @@ def _query_chunk_attention(
 # TODO: refactor CrossAttention#get_attention_scores to share code with this
 def _get_attention_scores_no_kv_chunking(
     query: Tensor,
-    key: Tensor,
+    key_t: Tensor,
     value: Tensor,
     scale: float,
 ) -> Tensor:
     attn_scores = torch.baddbmm(
         torch.empty(1, 1, 1, device=query.device, dtype=query.dtype),
         query,
-        key.transpose(1,2),
+        key_t,
         alpha=scale,
         beta=0,
     )
@@ -121,21 +121,21 @@ class ScannedChunk(NamedTuple):
 
 def efficient_dot_product_attention(
     query: Tensor,
-    key: Tensor,
+    key_t: Tensor,
     value: Tensor,
     query_chunk_size=1024,
     kv_chunk_size: Optional[int] = None,
     kv_chunk_size_min: Optional[int] = None,
     use_checkpoint=True,
 ):
-    """Computes efficient dot-product attention given query, key, and value.
+    """Computes efficient dot-product attention given query, transposed key, and value.
       This is efficient version of attention presented in
       https://arxiv.org/abs/2112.05682v2 which comes with O(sqrt(n)) memory requirements.
       Args:
         query: queries for calculating attention with shape of
           `[batch * num_heads, tokens, channels_per_head]`.
-        key: keys for calculating attention with shape of
-          `[batch * num_heads, tokens, channels_per_head]`.
+        key_t: keys for calculating attention with shape of
+          `[batch * num_heads, channels_per_head, tokens]`.
         value: values to be used in attention with shape of
           `[batch * num_heads, tokens, channels_per_head]`.
         query_chunk_size: int: query chunks size
@@ -146,7 +146,7 @@ def efficient_dot_product_attention(
         Output of shape `[batch * num_heads, query_tokens, channels_per_head]`.
       """
     batch_x_heads, q_tokens, q_channels_per_head = query.shape
-    _, k_tokens, _ = key.shape
+    _, _, k_tokens = key_t.shape
     scale = q_channels_per_head ** -0.5
 
     kv_chunk_size = min(kv_chunk_size or int(math.sqrt(k_tokens)), k_tokens)
@@ -178,7 +178,7 @@ def efficient_dot_product_attention(
         # fast-path for when there's just 1 query chunk
         return compute_query_chunk_attn(
             query=query,
-            key=key,
+            key_t=key_t,
             value=value,
         )
     
@@ -187,7 +187,7 @@ def efficient_dot_product_attention(
     res = torch.cat([
         compute_query_chunk_attn(
             query=get_query_chunk(i * query_chunk_size),
-            key=key,
+            key_t=key_t,
             value=value,
         ) for i in range(math.ceil(q_tokens / query_chunk_size))
     ], dim=1)
